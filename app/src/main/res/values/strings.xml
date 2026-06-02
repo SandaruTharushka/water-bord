@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Meter Reader</string>
+    <string name="tab_live_view">Live View</string>
+    <string name="tab_history">History</string>
+    <string name="last_reading">LAST READING</string>
+    <string name="no_readings_yet">No readings yet</string>
+    <string name="ocr_failed">OCR failed</string>
+    <string name="manual_capture">Capture Now</string>
+    <string name="export_csv">Export CSV</string>
+    <string name="next_capture_in">Next capture in %1$d:%2$02d</string>
+    <string name="capturing_now">Capturing…</string>
+    <string name="service_active">Meter Reader Active</string>
+    <string name="service_description">Reading every 30 min</string>
+</resources>
