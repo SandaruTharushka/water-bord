@@ -12,4 +12,6 @@
     <string name="capturing_now">Capturing…</string>
     <string name="service_active">Meter Reader Active</string>
     <string name="service_description">Reading every 30 min</string>
+    <string name="resume_title">Meter readings paused</string>
+    <string name="resume_text">Tap to resume meter readings</string>
 </resources>

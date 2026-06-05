@@ -48,37 +48,44 @@ class LiveViewFragment : Fragment() {
             resetCountdown()
         }
 
-        observeLatestReading()
+        observeReadings()
         startCountdown()
         startCameraPreview()
     }
 
-    private fun observeLatestReading() {
-        viewModel.latestReading.observe(viewLifecycleOwner) { reading ->
-            if (reading == null) {
-                binding.textLastValue.text = getString(R.string.no_readings_yet)
-                binding.textLastTimestamp.text = ""
-                setConfidenceColor(R.color.confidence_green)
-                return@observe
-            }
+    // latestReading/previousReading are now map()-derived LiveData, which only
+    // produce values while actively observed. Observe both so previousReading
+    // is populated when we read it for the confidence colour.
+    private fun observeReadings() {
+        viewModel.latestReading.observe(viewLifecycleOwner) { renderLatest() }
+        viewModel.previousReading.observe(viewLifecycleOwner) { renderLatest() }
+    }
 
-            binding.textLastTimestamp.text = dateFormat.format(Date(reading.timestamp))
-            binding.textLastValue.text = if (reading.isValid && reading.rawValue != null)
-                "${"%.2f".format(reading.rawValue)} ${reading.unit}"
-            else
-                getString(R.string.ocr_failed)
-
-            val previous = viewModel.previousReading.value
-            val colorRes = when {
-                !reading.isValid -> R.color.confidence_red
-                previous?.rawValue != null && reading.rawValue != null -> {
-                    val pct = abs(reading.rawValue - previous.rawValue) / previous.rawValue * 100
-                    if (pct > 5) R.color.confidence_yellow else R.color.confidence_green
-                }
-                else -> R.color.confidence_green
-            }
-            setConfidenceColor(colorRes)
+    private fun renderLatest() {
+        val reading = viewModel.latestReading.value
+        if (reading == null) {
+            binding.textLastValue.text = getString(R.string.no_readings_yet)
+            binding.textLastTimestamp.text = ""
+            setConfidenceColor(R.color.confidence_green)
+            return
         }
+
+        binding.textLastTimestamp.text = dateFormat.format(Date(reading.timestamp))
+        binding.textLastValue.text = if (reading.isValid && reading.rawValue != null)
+            "${"%.2f".format(reading.rawValue)} ${reading.unit}"
+        else
+            getString(R.string.ocr_failed)
+
+        val previous = viewModel.previousReading.value
+        val colorRes = when {
+            !reading.isValid -> R.color.confidence_red
+            previous?.rawValue != null && reading.rawValue != null -> {
+                val pct = abs(reading.rawValue - previous.rawValue) / previous.rawValue * 100
+                if (pct > 5) R.color.confidence_yellow else R.color.confidence_green
+            }
+            else -> R.color.confidence_green
+        }
+        setConfidenceColor(colorRes)
     }
 
     private fun setConfidenceColor(colorRes: Int) {

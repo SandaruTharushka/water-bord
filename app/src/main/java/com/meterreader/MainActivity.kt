@@ -1,9 +1,14 @@
 package com.meterreader
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -32,6 +37,7 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
             if (results.all { it.value }) {
                 ServiceManager.startService(this)
+                maybeRequestIgnoreBatteryOptimizations()
             } else {
                 Toast.makeText(
                     this,
@@ -74,8 +80,38 @@ class MainActivity : AppCompatActivity() {
         }
         if (missing.isEmpty()) {
             ServiceManager.startService(this)
+            maybeRequestIgnoreBatteryOptimizations()
         } else {
             permissionLauncher.launch(missing.toTypedArray())
         }
+    }
+
+    /**
+     * Unattended capture for days requires exemption from Doze/App Standby. Once
+     * permissions are granted, ask the user to whitelist the app — but only once,
+     * so we don't nag on every launch.
+     */
+    private fun maybeRequestIgnoreBatteryOptimizations() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+
+        val prefs = getSharedPreferences("meter_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_BATTERY_OPT_REQUESTED, false)) return
+        prefs.edit().putBoolean(KEY_BATTERY_OPT_REQUESTED, true).apply()
+
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        } catch (e: Exception) {
+            // Some OEMs don't expose this screen — safe to ignore.
+        }
+    }
+
+    companion object {
+        private const val KEY_BATTERY_OPT_REQUESTED = "battery_opt_requested"
     }
 }

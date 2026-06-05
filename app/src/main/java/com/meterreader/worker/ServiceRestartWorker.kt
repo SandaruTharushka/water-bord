@@ -3,27 +3,38 @@ package com.meterreader.worker
 import android.content.Context
 import android.util.Log
 import androidx.work.*
-import com.meterreader.service.ServiceManager
+import com.meterreader.service.MeterStatus
+import com.meterreader.service.ResumeNotifier
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "ServiceRestartWorker"
 private const val WORK_NAME = "meter_service_restart"
 
+/**
+ * Periodic watchdog. It does NOT — and on Android 12+ legally cannot — start
+ * the camera foreground service from the background. Instead it checks whether
+ * readings have gone stale and, if so, posts a notification prompting the user
+ * to reopen the app, which legally starts the service from the foreground.
+ */
 class ServiceRestartWorker(
     context: Context,
     params: WorkerParameters
 ) : Worker(context, params) {
 
     override fun doWork(): Result {
-        Log.i(TAG, "WorkManager: restarting MeterReaderService")
-        ServiceManager.startService(applicationContext)
+        if (MeterStatus.isStale(applicationContext)) {
+            Log.i(TAG, "Readings are stale — prompting user to resume")
+            ResumeNotifier.postResumeNotification(applicationContext)
+        } else {
+            Log.i(TAG, "Readings are fresh — no action needed")
+        }
         return Result.success()
     }
 
     companion object {
         /**
-         * Enqueues a periodic WorkManager task that ensures the foreground
-         * service is alive. WorkManager survives app kills and reboots.
+         * Enqueues a periodic watchdog that detects stalled capturing and nudges
+         * the user to reopen the app. WorkManager survives app kills and reboots.
          */
         fun schedule(context: Context) {
             val request = PeriodicWorkRequestBuilder<ServiceRestartWorker>(
@@ -42,7 +53,7 @@ class ServiceRestartWorker(
                 ExistingPeriodicWorkPolicy.KEEP,
                 request
             )
-            Log.i(TAG, "Periodic restart worker scheduled")
+            Log.i(TAG, "Periodic watchdog scheduled")
         }
     }
 }
