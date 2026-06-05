@@ -41,11 +41,23 @@ class CameraCapture(private val context: Context) {
                         .build()
 
                     provider.unbindAll()
-                    provider.bindToLifecycle(
+                    val camera = provider.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.DEFAULT_BACK_CAMERA,
                         imageCapture
                     )
+
+                    // The meter box is dark and the shot is close-up: turn on the
+                    // torch and run a centre focus/metering pass before capturing,
+                    // otherwise screen-off photos come out black/blurry.
+                    val cameraControl = camera.cameraControl
+                    cameraControl.enableTorch(true)
+                    val centerPoint = SurfaceOrientedMeteringPoint(0.5f, 0.5f)
+                    val focusAction = FocusMeteringAction.Builder(
+                        centerPoint,
+                        FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                    ).build()
+                    cameraControl.startFocusAndMetering(focusAction)
 
                     imageCapture.takePicture(
                         executor,
@@ -54,10 +66,12 @@ class CameraCapture(private val context: Context) {
                                 try {
                                     val base64 = imageProxyToBase64(image)
                                     image.close()
+                                    cameraControl.enableTorch(false)
                                     releaseCamera()
                                     cont.resume(base64)
                                 } catch (e: Exception) {
                                     image.close()
+                                    cameraControl.enableTorch(false)
                                     releaseCamera()
                                     cont.resumeWithException(e)
                                 }
@@ -65,13 +79,17 @@ class CameraCapture(private val context: Context) {
 
                             override fun onError(exception: ImageCaptureException) {
                                 Log.e(TAG, "Image capture failed", exception)
+                                cameraControl.enableTorch(false)
                                 releaseCamera()
                                 cont.resumeWithException(exception)
                             }
                         }
                     )
 
-                    cont.invokeOnCancellation { releaseCamera() }
+                    cont.invokeOnCancellation {
+                        cameraControl.enableTorch(false)
+                        releaseCamera()
+                    }
 
                 } catch (e: Exception) {
                     Log.e(TAG, "Camera bind failed", e)

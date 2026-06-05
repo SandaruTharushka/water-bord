@@ -2,8 +2,8 @@ package com.meterreader.ocr
 
 import android.util.Log
 import com.meterreader.BuildConfig
-import com.squareup.okhttp3.OkHttpClient
-import com.squareup.okhttp3.logging.HttpLoggingInterceptor
+import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body

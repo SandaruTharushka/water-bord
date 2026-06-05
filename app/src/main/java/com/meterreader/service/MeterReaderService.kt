@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.lifecycle.LifecycleService
 import com.meterreader.MainActivity
 import com.meterreader.R
 import com.meterreader.camera.CameraCapture
@@ -28,21 +29,23 @@ const val PRUNE_DAYS           = 90L
 /** Send this action to trigger an immediate capture outside the normal schedule. */
 const val ACTION_MANUAL_CAPTURE = "com.meterreader.ACTION_MANUAL_CAPTURE"
 
+/** Fired by AlarmManager for each scheduled capture; reschedules the next alarm. */
+const val ACTION_SCHEDULED_CAPTURE = "com.meterreader.ACTION_SCHEDULED_CAPTURE"
+
+private const val REQUEST_CODE_SCHEDULED_CAPTURE = 1001
+
+// Keep the CPU awake just long enough for capture + Vision upload while the
+// screen is off. Auto-released by the OS after the timeout as a safety net.
+private const val WAKELOCK_TAG = "MeterReader:CaptureCycle"
+private const val WAKELOCK_TIMEOUT_MS = 60_000L
+
 class MeterReaderService : LifecycleService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val handler = Handler(Looper.getMainLooper())
 
     private lateinit var cameraCapture: CameraCapture
     private lateinit var visionClient: VisionApiClient
     private lateinit var db: AppDatabase
-
-    private val captureRunnable = object : Runnable {
-        override fun run() {
-            serviceScope.launch { performCaptureCycle() }
-            handler.postDelayed(this, CAPTURE_INTERVAL_MS)
-        }
-    }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -60,24 +63,76 @@ class MeterReaderService : LifecycleService() {
 
         when (intent?.action) {
             ACTION_MANUAL_CAPTURE -> {
+                // Manual capture is one-shot and must NOT touch the schedule.
                 Log.i(TAG, "Manual capture requested")
                 serviceScope.launch { performCaptureCycle() }
             }
+            ACTION_SCHEDULED_CAPTURE -> {
+                // Alarm-driven capture: run it, then arm the next alarm so the
+                // 30-min cadence continues for as long as the service lives.
+                Log.i(TAG, "Scheduled capture fired")
+                serviceScope.launch {
+                    performCaptureCycle()
+                    scheduleNextCapture()
+                }
+            }
             else -> {
-                // Normal start: schedule periodic captures (avoid double-posting)
-                handler.removeCallbacks(captureRunnable)
-                handler.post(captureRunnable)
-                Log.i(TAG, "Service started — capture every 30 min")
+                // Normal start (legally from the foreground): capture now for
+                // instant feedback, then arm the recurring alarm.
+                Log.i(TAG, "Service started — capturing now, then every 30 min via AlarmManager")
+                serviceScope.launch { performCaptureCycle() }
+                scheduleNextCapture()
             }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(captureRunnable)
+        cancelScheduledCapture()
         cameraCapture.releaseCamera()
         serviceScope.cancel()
         super.onDestroy()
+    }
+
+    // ── Alarm scheduling ──────────────────────────────────────────────────────
+
+    private fun scheduleNextCapture() {
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val triggerAt = System.currentTimeMillis() + CAPTURE_INTERVAL_MS
+        val pi = scheduledCapturePendingIntent()
+
+        // Exact alarms need no permission below API 31; above it, honour the
+        // user's "Alarms & reminders" setting and fall back to inexact.
+        val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()
+        try {
+            if (canExact) {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            } else {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            }
+            Log.i(TAG, "Next capture scheduled in ${CAPTURE_INTERVAL_MS / 60_000} min (exact=$canExact)")
+        } catch (e: SecurityException) {
+            // Exact-alarm permission revoked while running — degrade gracefully.
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            Log.w(TAG, "Exact alarm denied; used inexact alarm", e)
+        }
+    }
+
+    private fun cancelScheduledCapture() {
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        am.cancel(scheduledCapturePendingIntent())
+    }
+
+    private fun scheduledCapturePendingIntent(): PendingIntent {
+        val intent = Intent(this, MeterReaderService::class.java).apply {
+            action = ACTION_SCHEDULED_CAPTURE
+        }
+        return PendingIntent.getService(
+            this,
+            REQUEST_CODE_SCHEDULED_CAPTURE,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
     }
 
     // ── Capture cycle ─────────────────────────────────────────────────────────
@@ -85,42 +140,56 @@ class MeterReaderService : LifecycleService() {
     private suspend fun performCaptureCycle() {
         Log.i(TAG, "Starting capture cycle")
 
-        val base64 = try {
-            cameraCapture.captureImageAsBase64(this)
-        } catch (e: Exception) {
-            Log.e(TAG, "Camera capture failed", e)
-            saveInvalidReading("Camera error: ${e.message}")
-            return
+        // Hold a partial wake lock so capture + upload survive screen-off CPU
+        // suspension. The 60s timeout guarantees release even if we crash.
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply {
+            setReferenceCounted(false)
         }
+        wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
 
-        val ocrText = visionClient.extractText(base64)
-        if (ocrText == null) {
-            Log.w(TAG, "Vision API returned null — network or quota error")
-            saveInvalidReading(null)
-            sendNotification("OCR failed — check camera angle or network")
-            return
-        }
+        try {
+            val base64 = try {
+                cameraCapture.captureImageAsBase64(this)
+            } catch (e: Exception) {
+                Log.e(TAG, "Camera capture failed", e)
+                saveInvalidReading("Camera error: ${e.message}")
+                return
+            }
 
-        val value = NumberExtractor.extractTotalizer(ocrText)
-        val isValid = value != null
+            val ocrText = visionClient.extractText(base64)
+            if (ocrText == null) {
+                Log.w(TAG, "Vision API returned null — network or quota error")
+                saveInvalidReading(null)
+                sendNotification("OCR failed — check camera angle or network")
+                return
+            }
 
-        db.meterReadingDao().insert(
-            MeterReading(
-                timestamp  = System.currentTimeMillis(),
-                rawValue   = value,
-                unit       = "m³",
-                rawOcrText = ocrText,
-                isValid    = isValid
+            val value = NumberExtractor.extractTotalizer(ocrText)
+            val isValid = value != null
+
+            db.meterReadingDao().insert(
+                MeterReading(
+                    timestamp  = System.currentTimeMillis(),
+                    rawValue   = value,
+                    unit       = "m³",
+                    rawOcrText = ocrText,
+                    isValid    = isValid
+                )
             )
-        )
-        pruneOldRecords()
+            pruneOldRecords()
 
-        if (isValid) {
-            Log.i(TAG, "Reading saved: $value m³")
-            sendNotification("Meter reading: ${"%.2f".format(value)} m³")
-        } else {
-            Log.w(TAG, "OCR returned no valid number. Raw: $ocrText")
-            sendNotification("OCR failed — check camera angle")
+            if (isValid) {
+                // Stamp the last-success time so the watchdog can detect stalls.
+                MeterStatus.recordSuccess(applicationContext)
+                Log.i(TAG, "Reading saved: $value m³")
+                sendNotification("Meter reading: ${"%.2f".format(value)} m³")
+            } else {
+                Log.w(TAG, "OCR returned no valid number. Raw: $ocrText")
+                sendNotification("OCR failed — check camera angle")
+            }
+        } finally {
+            if (wakeLock.isHeld) wakeLock.release()
         }
     }
 
